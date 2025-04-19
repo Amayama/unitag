@@ -1,0 +1,11 @@
+./graph_stage1/wandb
+
+./graph_stage1/data
+
+*.log
+
+./graphvq/wandb/
+
+./graphvq/data
+
+./data/
