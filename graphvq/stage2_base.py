@@ -132,8 +132,7 @@ def train_graph_tokenizer(tokenizer, data_loader, optimizer, device, epochs=100,
         # Update learning rate scheduler
         scheduler.step(avg_loss)
         
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, "
-              f"Recon: {avg_recon_loss:.4f}, VQ: {avg_vq_loss:.4f}, Commit: {avg_commit_loss:.4f}")
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Recon: {avg_recon_loss:.4f}, VQ: {avg_vq_loss:.4f}, Commit: {avg_commit_loss:.4f}")
         
         # Log epoch metrics to wandb
         if log_wandb:
@@ -410,161 +409,11 @@ def train_graph_llm(graph_llm, data_loader, optimizer, device, epochs=50, log_wa
         wandb.save("final_graph_llm_checkpoint.pt")
     
     return graph_llm
-        
-        # Calculate average metrics for the epoch
-        avg_loss = total_loss / len(data_loader) if len(data_loader) > 0 else 0
-        avg_accuracy = token_accuracy / total_tokens if total_tokens > 0 else 0
-        
-        # Update learning rate scheduler
-        scheduler.step(avg_loss)
-        
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Token Accuracy: {avg_accuracy:.4f}")
-        
-        # Log epoch metrics to wandb
-        if log_wandb:
-            wandb.log({
-                "epoch": epoch,
-                "train/loss": avg_loss,
-                "train/token_accuracy": avg_accuracy,
-                "train/learning_rate": optimizer.param_groups[0]['lr']
-            })
-            
-            # Log model parameters histograms (every 5 epochs)
-            if epoch % 5 == 0:
-                for name, param in graph_llm.named_parameters():
-                    if param.requires_grad:
-                        wandb.log({f"parameters/{name}": wandb.Histogram(param.data.cpu().numpy())})
-        
-        # Generate sample graph from fixed prompt (every 5 epochs)
-        if epoch % 5 == 0 and text_tokenizer is not None:
-            try:
-                # Set model to evaluation mode
-                graph_llm.eval()
-                
-                # Generate graph from a fixed prompt for consistent comparison
-                sample_prompt = "Generate a small-world network graph"
-                
-                # Tokenize prompt
-                prompt_tokens = text_tokenizer(
-                    sample_prompt, 
-                    return_tensors="pt"
-                ).input_ids.to(device)
-                
-                # Generate graph tokens
-                with torch.no_grad():
-                    # Forward pass through LLM to generate tokens
-                    output_tokens = graph_llm.base_llm.generate(
-                        input_ids=prompt_tokens,
-                        max_length=100,
-                        do_sample=True,
-                        top_p=0.9,
-                        temperature=0.7
-                    )
-                    
-                    # Extract generated tokens after the prompt
-                    generated_tokens = output_tokens[0, prompt_tokens.shape[1]:]
-                    
-                    # Convert to graph tokens and decode
-                    Z_list = graph_llm.tokens_to_graph(generated_tokens)
-                    adj_matrix, node_features = graph_llm.tokenizer.decode_graph(Z_list)
-                    
-                    # Visualize the generated graph
-                    plt.figure(figsize=(10, 8))
-                    G = nx.from_numpy_array(adj_matrix.cpu().numpy())
-                    pos = nx.spring_layout(G)
-                    nx.draw(G, pos, node_size=50, node_color='blue', alpha=0.8)
-                    plt.title(f"Generated Graph - Epoch {epoch}")
-                    
-                    if log_wandb:
-                        wandb.log({
-                            f"generated_graph_epoch_{epoch}": wandb.Image(plt)
-                        })
-                    plt.close()
-            except Exception as e:
-                print(f"Error generating sample graph: {e}")
-                traceback.print_exc()
-        
-        # Save best model
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            best_model_state = graph_llm.state_dict().copy()
-            
-            # Save checkpoint
-            torch.save(best_model_state, "best_graph_llm_checkpoint.pt")
-            if log_wandb:
-                wandb.save("best_graph_llm_checkpoint.pt")
-                wandb.log({"best_epoch": epoch, "best_loss": best_loss})
-        
-        # Save checkpoint every 10 epochs
-        if epoch % 10 == 9 or epoch == epochs - 1:
-            checkpoint_path = f"graph_llm_checkpoint_epoch_{epoch+1}.pt"
-            torch.save(graph_llm.state_dict(), checkpoint_path)
-            if log_wandb:
-                wandb.save(checkpoint_path)
-    
-    # Restore best model
-    if best_model_state is not None:
-        graph_llm.load_state_dict(best_model_state)
-    
-    # Final model save
-    torch.save(graph_llm.state_dict(), "final_graph_llm_checkpoint.pt")
-    if log_wandb:
-        wandb.save("final_graph_llm_checkpoint.pt")
-    
-    return graph_llm)
-                if batch_idx == 0 and hasattr(outputs, 'attentions') and outputs.attentions is not None:
-                    # Log first layer attention map from first head
-                    attention_map = outputs.attentions[0][0, 0].cpu().numpy()
-                    wandb.log({
-                        "attention_map": wandb.Image(plt.matshow(attention_map)),
-                    })
-        
-        avg_loss = total_loss / len(data_loader)
-        avg_accuracy = token_accuracy / total_tokens
-        
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Token Accuracy: {avg_accuracy:.4f}")
-        
-        # Log epoch metrics to wandb
-        if log_wandb:
-            wandb.log({
-                "epoch": epoch,
-                "epoch_loss": avg_loss,
-                "epoch_token_accuracy": avg_accuracy,
-                "learning_rate": optimizer.param_groups[0]['lr']
-            })
-            
-            # Generate sample graph from a fixed prompt once per epoch
-            if hasattr(graph_llm, 'generate_graph') and epoch % 5 == 0:
-                try:
-                    # Use a fixed prompt for consistent comparison
-                    sample_prompt = "Generate a social network graph with communities"
-                    adj_matrix, node_features = graph_llm.generate_graph(sample_prompt, tokenizer=None)
-                    
-                    # Visualize the generated graph
-                    plt.figure(figsize=(10, 10))
-                    G = nx.from_numpy_array(adj_matrix.cpu().numpy())
-                    pos = nx.spring_layout(G)
-                    nx.draw(G, pos, node_size=50, node_color='blue', alpha=0.8)
-                    plt.title(f"Generated Graph - Epoch {epoch}")
-                    
-                    wandb.log({
-                        "generated_graph": wandb.Image(plt),
-                    })
-                except Exception as e:
-                    print(f"Error generating sample graph: {e}")
-    
-    # Save model checkpoint to wandb
-    if log_wandb:
-        torch.save(graph_llm.state_dict(), "graph_llm_checkpoint.pt")
-        wandb.save("graph_llm_checkpoint.pt")
-        wandb.finish()
-    
-    return graph_llm
 
 # Complete pipeline example
 
-def hierarchical_graphvq_pipeline(use_wandb=True, dataset_name='cora', model_dir='meta-llama/Llama-3.1-8B-Instruct',batch_size=32, epochs=100, 
-                           learning_rate=0.001, train_llm=True, llm_epochs=50, llm_lr=0.0001):
+def hierarchical_graphvq_pipeline(use_wandb=True, dataset_name='cora', model_dir='meta-llama/Llama-3.1-8B-Instruct',batch_size=32, epochs=100, \
+learning_rate=0.001, train_llm=True, llm_epochs=50, llm_lr=0.0001):
     """
     Pipeline for Hierarchical GraphVQ with both Stage 1 (Graph Tokenizer) and Stage 2 (GraphLLM)
     
@@ -630,7 +479,7 @@ def hierarchical_graphvq_pipeline(use_wandb=True, dataset_name='cora', model_dir
             from torch_geometric.transforms import NormalizeFeatures
             
             dataset = Planetoid(
-                root=f'data/Planetoid', 
+                root=f'data/Cora', 
                 name=dataset_name.capitalize(),
                 transform=NormalizeFeatures()
             )
@@ -826,12 +675,11 @@ def hierarchical_graphvq_pipeline(use_wandb=True, dataset_name='cora', model_dir
             
             print("Stage 2: Initializing Graph LLM...")
             try:
-                from transformers import GPT2Model, GPT2Tokenizer, GPT2Config
                 from transformers import AutoModel, AutoTokenizer,AutoConfig
                 # Load pretrained model or initialize from scratch
-                base_llm_config = AutoConfig.from_pretrained()
-                base_llm=AutoModel.from_pretrained()
-                text_tokenizer = AutoTokenizer.from_pretrained()
+                base_llm_config = AutoConfig.from_pretrained(model_dir)
+                base_llm=AutoModel.from_pretrained(model_dir)
+                text_tokenizer = AutoTokenizer.from_pretrained(model_dir)
                 
                 # Create Graph LLM
                 graph_llm = GraphLLM(
@@ -1005,31 +853,7 @@ def hierarchical_graphvq_pipeline(use_wandb=True, dataset_name='cora', model_dir
     # Finish wandb run
     if use_wandb:
         wandb.finish()(f"Error importing transformers library: {e}")
-                print("Make sure to install transformers: pip install transformers")
-                if use_wandb:
-                    wandb.log({"error": str(e)})
-            
-            except Exception as e:
-                print(f"Error during LLM training: {e}")
-                import traceback
-                traceback.print_exc()
-                
-                if use_wandb:
-                    wandb.log({"error": str(e)})
-        
-    except Exception as e:
-        print(f"Error during pipeline execution: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        if use_wandb:
-            wandb.log({"error": str(e)})
-    
-    print("Hierarchical GraphVQ pipeline completed")
-    
-    # Finish wandb run
-    if use_wandb:
-        wandb.finish()
+        print("Make sure to install transformers: pip install transformers")
 
 if __name__ == "__main__":
     # Add command line arguments for wandb
@@ -1039,7 +863,7 @@ if __name__ == "__main__":
     parser.add_argument('--wandb_key', type=str, help='Weights & Biases API key')
     parser.add_argument('--wandb_project', type=str, default='hierarchical-graphvq', help='Weights & Biases project name')
     parser.add_argument('--wandb_entity', type=str, help='Weights & Biases entity name')
-    parser.add_argument('--model_dir', type=str, help='pretrained or finetuned model location')
+    parser.add_argument('--model_dir', type=str, default='meta-llama/Llama-3.1-8B-Instruct',help='pretrained or finetuned model location')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
@@ -1074,12 +898,10 @@ if __name__ == "__main__":
         use_wandb=args.use_wandb,
         dataset_name=args.dataset,
         batch_size=args.batch_size,
+        model_dir=args.model_dir,
         epochs=args.epochs,
         learning_rate=args.lr,
         train_llm=args.train_llm,
         llm_epochs=args.llm_epochs,
         llm_lr=args.llm_lr
     )
-
-if __name__ == "__main__":
-    hierarchical_graphvq_pipeline()
