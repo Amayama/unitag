@@ -9,3 +9,5 @@
 ./graphvq/data
 
 ./data/
+
+./wandb/

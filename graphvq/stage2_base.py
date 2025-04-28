@@ -7,6 +7,7 @@ import wandb
 import os
 import matplotlib.pyplot as plt
 import networkx as nx
+from tqdm import tqdm
 from torch_geometric.nn import MessagePassing, GCNConv
 from torch_geometric.utils import to_dense_adj
 from models.graph_decoder import *
@@ -52,7 +53,7 @@ def train_graph_tokenizer(tokenizer, data_loader, optimizer, device, epochs=100,
         # Set tokenizer to training mode
         tokenizer.train()
         
-        for batch_idx, batch in enumerate(data_loader):
+        for batch_idx, batch in tqdm(enumerate(data_loader)):
             batch = batch.to(device)
             edge_index, x = batch.edge_index, batch.x
             
@@ -428,7 +429,7 @@ learning_rate=0.001, train_llm=True, llm_epochs=50, llm_lr=0.0001):
         llm_lr: Learning rate for the LLM optimizer
     """
     # Define parameters
-    input_dim = 768  # Node feature dimension (will be updated based on dataset)
+    input_dim = 1433  # Node feature dimension (will be updated based on dataset)
     hidden_dim = 256  # Hidden layer dimension
     K = 3  # Maximum number of hops
     M_list = [256, 128, 64]  # Codebook sizes for each hop
@@ -479,7 +480,7 @@ learning_rate=0.001, train_llm=True, llm_epochs=50, llm_lr=0.0001):
             from torch_geometric.transforms import NormalizeFeatures
             
             dataset = Planetoid(
-                root=f'data/Cora', 
+                root=f'../data/Cora', 
                 name=dataset_name.capitalize(),
                 transform=NormalizeFeatures()
             )
@@ -850,10 +851,6 @@ learning_rate=0.001, train_llm=True, llm_epochs=50, llm_lr=0.0001):
     
     print("Hierarchical GraphVQ pipeline completed")
     
-    # Finish wandb run
-    if use_wandb:
-        wandb.finish()(f"Error importing transformers library: {e}")
-        print("Make sure to install transformers: pip install transformers")
 
 if __name__ == "__main__":
     # Add command line arguments for wandb

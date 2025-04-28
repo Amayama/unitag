@@ -1,0 +1,1 @@
+{"error": "Attempted to change value of key \"input_dim\" from 768 to 1433\nIf you really want to do this, pass allow_val_change=True to config.update()", "_timestamp": 1745846138.7580028, "_runtime": 10.418948650360107, "_step": 0, "_wandb": {"runtime": 4}}
