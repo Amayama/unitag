@@ -29,5 +29,17 @@ deepspeed --num_gpus=2 new_stage1_training.py \
   --max_seq_length=256  \
   --use_wandb \
 
-For stage 2:
+For stage 2:\
 python stage2_base.py --use_wandb --dataset cora --batch_size 16 --epochs 100 --lr 0.001 --train_llm --llm_epochs 30 --llm_lr 0.0001
+
+For stage 2 with DDP:\
+python -m torch.distributed.launch --nproc_per_node=4 stage2_ddp.py \
+    --dataset cora \
+    --batch_size 16 \
+    --epochs 100 \
+    --lr 0.001 \
+    --train_llm \
+    --llm_epochs 30 \
+    --llm_lr 0.0001 \
+    --output_dir ./models/ddp_run \
+    --use_wandb

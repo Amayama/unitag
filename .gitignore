@@ -1,4 +1,6 @@
-./graph_stage1/wandb
+/graph_stage1/wandb/
+
+./graph_stage1/wandb/
 
 ./graph_stage1/data
 
@@ -6,8 +8,20 @@
 
 ./graphvq/wandb/
 
-./graphvq/data
+./graphvq/wandb/*
 
-./data/
+/graphvq/wandb/
 
-./wandb/
+/graphvq/wandb/
+
+./graphvq/data/*
+
+./data/*
+
+./wandb/*
+
+./output/*
+
+/graphvq/output/
+
+./graphvq/output/*
