@@ -10,10 +10,12 @@ import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DataLoader as GeoDataLoader
 from torch_geometric.nn import MessagePassing, GCNConv
 from torch_geometric.utils import to_dense_adj
 from torch_geometric.datasets import Planetoid
+from torch_geometric.data import Batch, Data
+from torch.utils.data import Dataset
 import datetime
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 import wandb
@@ -28,7 +30,195 @@ from models.graph_decoder import GraphDecoder
 from models.graph_encoder import GNNEncoder
 from models.graph_llm import GraphLLM
 from models.graph_tokenizer import GraphTokenizer
-from models.text_graph_dataset import TextGraphDataset
+
+
+class TextGraphDataset(Dataset):
+    """
+    Dataset that pairs text prompts with graph data for training Graph LLM
+    """
+    def __init__(self, graph_data, text_tokenizer, dataset_name, num_samples=100, max_length=64):
+        self.graph_data = graph_data
+        self.text_tokenizer = text_tokenizer
+        self.dataset_name = dataset_name.lower()
+        self.num_samples = num_samples
+        self.max_length = max_length
+        
+        # Create prompts based on dataset type
+        if self.dataset_name in ['cora', 'citeseer', 'pubmed']:
+            # For citation networks, create paper-related prompts
+            base_prompts = [
+                f"Generate a citation network similar to {dataset_name}",
+                f"Create a graph of {dataset_name} paper citations", 
+                f"Produce a citation graph in the style of {dataset_name}",
+                f"Generate a network of papers like {dataset_name}",
+                f"Show me a {dataset_name}-like citation structure",
+                f"Create an academic citation network",
+                f"Generate a research paper citation graph",
+                f"Build a scientific paper network",
+                f"Create a bibliography graph structure",
+                f"Generate a scholarly citation network"
+            ]
+            
+            # Extend prompts to match num_samples
+            self.prompts = []
+            for i in range(num_samples):
+                if i < len(base_prompts):
+                    self.prompts.append(base_prompts[i])
+                else:
+                    # Create variations
+                    base_idx = i % len(base_prompts)
+                    variation_idx = i // len(base_prompts)
+                    self.prompts.append(f"{base_prompts[base_idx]} (variant {variation_idx})")
+        else:
+            # For other datasets, create more generic prompts
+            self.prompts = [
+                f"Generate a graph similar to sample {i}" for i in range(num_samples)
+            ]
+        
+        if len(self.graph_data) > 0:
+            print(f"Created TextGraphDataset with {len(self.prompts)} prompts and {len(self.graph_data)} graphs")
+    
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        # Get text prompt
+        prompt = self.prompts[idx % len(self.prompts)]
+        
+        # Tokenize prompt
+        prompt_tokens = self.text_tokenizer(
+            prompt, 
+            return_tensors="pt", 
+            padding="max_length", 
+            truncation=True,
+            max_length=self.max_length
+        ).input_ids.squeeze(0)  # Remove batch dimension
+        
+        # Get graph - cycle through available graphs
+        graph_idx = idx % len(self.graph_data)
+        graph = self.graph_data[graph_idx]
+        
+        return {
+            'prompt_tokens': prompt_tokens,
+            'graph': graph,
+            'prompt_text': prompt
+        }
+
+
+def graph_text_collate_fn(batch):
+    """
+    Custom collate function for batching text-graph pairs
+    """
+    # Extract components
+    prompt_tokens_list = [item['prompt_tokens'] for item in batch]
+    graphs_list = [item['graph'] for item in batch]
+    prompt_texts = [item['prompt_text'] for item in batch]
+    
+    # Stack prompt tokens (they should all have the same length due to padding)
+    prompt_tokens_batch = torch.stack(prompt_tokens_list, dim=0)
+    
+    # Batch the graphs using torch_geometric's Batch.from_data_list
+    try:
+        graphs_batch = Batch.from_data_list(graphs_list)
+    except Exception as e:
+        print(f"Error batching graphs: {e}")
+        # Fallback: return individual graphs
+        graphs_batch = graphs_list[0] if len(graphs_list) > 0 else None
+    
+    return {
+        'prompt_tokens': prompt_tokens_batch,
+        'graphs': graphs_batch,
+        'prompt_texts': prompt_texts
+    }
+
+
+def sample_subgraphs_improved(data, num_samples, subgraph_size, min_edges=1):
+    """
+    Improved subgraph sampling with better connectivity and validation
+    """
+    subgraphs = []
+    max_attempts = num_samples * 3  # Allow multiple attempts
+    attempts = 0
+    
+    print(f"Sampling {num_samples} subgraphs of size {subgraph_size} from graph with {data.num_nodes} nodes")
+    
+    while len(subgraphs) < num_samples and attempts < max_attempts:
+        attempts += 1
+        
+        try:
+            # Randomly select a starting node (prefer nodes with higher degree)
+            edge_index = data.edge_index
+            degrees = torch.bincount(edge_index[0], minlength=data.num_nodes)
+            
+            # Sample starting node with probability proportional to degree + 1
+            weights = degrees.float() + 1.0
+            start_idx = torch.multinomial(weights, 1).item()
+            
+            # Perform BFS to get connected subgraph
+            visited = set([start_idx])
+            frontier = [start_idx]
+            subgraph_nodes = [start_idx]
+            
+            while len(subgraph_nodes) < subgraph_size and frontier:
+                current = frontier.pop(0)
+                
+                # Get neighbors of current node
+                neighbors = edge_index[1][edge_index[0] == current].tolist()
+                
+                # Shuffle neighbors for randomness
+                np.random.shuffle(neighbors)
+                
+                for neighbor in neighbors:
+                    if neighbor not in visited and len(subgraph_nodes) < subgraph_size:
+                        visited.add(neighbor)
+                        frontier.append(neighbor)
+                        subgraph_nodes.append(neighbor)
+            
+            # Skip if subgraph is too small
+            if len(subgraph_nodes) < max(3, subgraph_size // 4):
+                continue
+            
+            # Create subgraph edge index
+            node_idx = torch.tensor(subgraph_nodes, dtype=torch.long)
+            row, col = edge_index
+            
+            # Find edges within the subgraph
+            edge_mask = torch.isin(row, node_idx) & torch.isin(col, node_idx)
+            subgraph_edges = edge_index[:, edge_mask]
+            
+            # Skip if not enough edges
+            if subgraph_edges.size(1) < min_edges:
+                continue
+            
+            # Remap node indices to be consecutive (0, 1, 2, ...)
+            node_mapping = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(node_idx)}
+            
+            # Remap edge indices
+            remapped_edges = torch.tensor([
+                [node_mapping[row_idx.item()] for row_idx in subgraph_edges[0]],
+                [node_mapping[col_idx.item()] for col_idx in subgraph_edges[1]]
+            ], dtype=torch.long)
+            
+            # Create subgraph data object
+            subgraph = Data(
+                x=data.x[node_idx],  # Node features
+                edge_index=remapped_edges,  # Remapped edges
+                y=data.y[node_idx] if hasattr(data, 'y') and data.y is not None else None,  # Node labels
+                num_nodes=len(subgraph_nodes)
+            )
+            
+            # Validate the subgraph
+            if (subgraph.x.size(0) > 0 and 
+                subgraph.edge_index.size(1) >= min_edges and
+                subgraph.edge_index.max() < subgraph.x.size(0)):
+                subgraphs.append(subgraph)
+                
+        except Exception as e:
+            print(f"Error creating subgraph {attempts}: {e}")
+            continue
+    
+    print(f"Successfully created {len(subgraphs)} valid subgraphs after {attempts} attempts")
+    return subgraphs
 
 
 def setup_distributed(args):
@@ -43,6 +233,10 @@ def setup_distributed(args):
     if args.local_rank == -1:
         # Single GPU code...
         print("Running in single GPU mode")
+        args.world_size = 1
+        args.n_gpu = 1
+        args.is_master = True
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     else:
         try:
             print(f"Process {args.local_rank}: Setting device")
@@ -65,12 +259,14 @@ def setup_distributed(args):
     print(f"Process {args.local_rank}: setup_distributed completed")
     return args
 
+
 def cleanup_distributed():
     """
     Clean up the distributed environment
     """
     if dist.is_initialized():
         dist.destroy_process_group()
+
 
 def set_seed(seed):
     """
@@ -83,6 +279,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
 
 def train_graph_tokenizer_ddp(tokenizer, data_loader, optimizer, args, epochs=100):
     """
@@ -334,6 +531,7 @@ def train_graph_tokenizer_ddp(tokenizer, data_loader, optimizer, args, epochs=10
     
     return tokenizer
 
+
 def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=None, epochs=50):
     """
     Train the graph LLM with Distributed Data Parallel
@@ -398,30 +596,48 @@ def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=
         
         for batch_idx, batch in enumerate(data_loader):
             try:
-                # Unpack batch
-                prompt_tokens, graph = batch
+                # Unpack batch - using the new format
+                prompt_tokens = batch['prompt_tokens'].to(args.device)
+                graphs_batch = batch['graphs']
                 
-                # Move data to device
-                prompt_tokens = prompt_tokens.to(args.device)
-                graph = graph.to(args.device)
+                # Handle single graph vs batched graphs
+                if isinstance(graphs_batch, list):
+                    # If it's a list, take the first graph for now
+                    graph = graphs_batch[0].to(args.device)
+                else:
+                    # If it's a batched graph object
+                    graph = graphs_batch.to(args.device)
                 
                 optimizer.zero_grad()
                 
                 # Get graph tokens from the tokenizer
                 if isinstance(graph_llm, DDP):
-                    edge_index, x = graph.edge_index, graph.x
+                    # For batched graphs, we need to handle each graph separately
+                    if hasattr(graph, 'batch'):
+                        # This is a batched graph from torch_geometric
+                        edge_index, x = graph.edge_index, graph.x
+                    else:
+                        # Single graph
+                        edge_index, x = graph.edge_index, graph.x
+                    
                     Z_list = graph_llm.module.tokenizer.encode_graph(edge_index, x)
                     
                     # Convert to text tokens
                     graph_tokens = graph_llm.module.graph_to_tokens(Z_list)
                 else:
-                    edge_index, x = graph.edge_index, graph.x
+                    if hasattr(graph, 'batch'):
+                        # This is a batched graph from torch_geometric
+                        edge_index, x = graph.edge_index, graph.x
+                    else:
+                        # Single graph
+                        edge_index, x = graph.edge_index, graph.x
+                    
                     Z_list = graph_llm.tokenizer.encode_graph(edge_index, x)
                     
                     # Convert to text tokens
                     graph_tokens = graph_llm.graph_to_tokens(Z_list)
                 
-                # Reshape tokens if needed
+                # Ensure proper tensor shapes
                 if len(prompt_tokens.shape) == 1:
                     prompt_tokens = prompt_tokens.unsqueeze(0)
                 if len(graph_tokens.shape) == 1:
@@ -662,6 +878,7 @@ def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=
     
     return graph_llm
 
+
 def hierarchical_graphvq_pipeline_ddp(args):
     """
     DDP version of the Hierarchical GraphVQ pipeline
@@ -719,62 +936,12 @@ def hierarchical_graphvq_pipeline_ddp(args):
                 print(f"  Number of node features: {input_dim}")
                 print(f"  Number of classes: {dataset.num_classes}")
             
-            # Function to sample subgraphs for training
-            def sample_subgraphs(data, num_samples, subgraph_size):
-                subgraphs = []
-                for _ in range(num_samples):
-                    # Randomly select a starting node
-                    start_idx = torch.randint(0, data.num_nodes, (1,)).item()
-                    
-                    # Perform BFS to get connected subgraph
-                    visited = set([start_idx])
-                    frontier = [start_idx]
-                    subgraph_nodes = [start_idx]
-                    
-                    while len(subgraph_nodes) < subgraph_size and frontier:
-                        current = frontier.pop(0)
-                        # Get neighbors of current node
-                        neighbors = data.edge_index[1][data.edge_index[0] == current].tolist()
-                        
-                        for neighbor in neighbors:
-                            if neighbor not in visited and len(subgraph_nodes) < subgraph_size:
-                                visited.add(neighbor)
-                                frontier.append(neighbor)
-                                subgraph_nodes.append(neighbor)
-                    
-                    # Create a subgraph with the selected nodes
-                    node_idx = torch.tensor(subgraph_nodes)
-                    row, col = data.edge_index
-                    edge_mask = torch.isin(row, node_idx) & torch.isin(col, node_idx)
-                    
-                    # Create a new edge_index for the subgraph
-                    subgraph_edge_index = data.edge_index[:, edge_mask]
-                    
-                    # Remap node indices to be consecutive
-                    node_idx_map = {int(idx): i for i, idx in enumerate(node_idx)}
-                    subgraph_edge_index_mapped = torch.tensor([
-                        [node_idx_map[int(idx)] for idx in subgraph_edge_index[0]],
-                        [node_idx_map[int(idx)] for idx in subgraph_edge_index[1]]
-                    ])
-                    
-                    # Create a new data object for the subgraph
-                    from torch_geometric.data import Data
-                    subgraph = Data(
-                        x=data.x[node_idx],
-                        edge_index=subgraph_edge_index_mapped,
-                        y=data.y[node_idx]
-                    )
-                    
-                    subgraphs.append(subgraph)
-                
-                return subgraphs
-            
-            # Sample subgraphs for training
+            # Sample subgraphs for training using the improved function
             subgraph_size = min(num_nodes, args.subgraph_size)
             num_samples = args.num_subgraphs
-            subgraphs = sample_subgraphs(data, num_samples, subgraph_size)
+            subgraphs = sample_subgraphs_improved(data, num_samples, subgraph_size, min_edges=2)
             
-            # Create data loader with distributed sampler
+            # Create data loader with distributed sampler for Stage 1 (tokenizer training)
             if args.local_rank != -1:
                 train_sampler = DistributedSampler(
                     subgraphs, 
@@ -784,7 +951,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
             else:
                 train_sampler = None
             
-            data_loader = DataLoader(
+            data_loader = GeoDataLoader(  # Use torch_geometric DataLoader
                 subgraphs, 
                 batch_size=args.batch_size,
                 shuffle=(train_sampler is None),
@@ -793,7 +960,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
             )
             
             if args.is_master:
-                print(f"Created {num_samples} subgraphs of size {subgraph_size}")
+                print(f"Created {len(subgraphs)} subgraphs of size {subgraph_size}")
                 print(f"Each process will see ~{len(data_loader) * args.batch_size} samples per epoch")
             
             # Update num_nodes to the subgraph size for the tokenizer
@@ -828,7 +995,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
             else:
                 train_sampler = None
             
-            data_loader = DataLoader(
+            data_loader = GeoDataLoader(
                 dataset, 
                 batch_size=args.batch_size,
                 shuffle=(train_sampler is None),
@@ -884,7 +1051,6 @@ def hierarchical_graphvq_pipeline_ddp(args):
                 print("Stage 2: Initializing Graph LLM...")
             
             try:
-                
                 # Load pretrained model
                 base_llm_config = AutoConfig.from_pretrained(args.model_dir)
                 base_llm = AutoModel.from_pretrained(args.model_dir)
@@ -914,18 +1080,27 @@ def hierarchical_graphvq_pipeline_ddp(args):
                 
                 text_tokenizer = graph_llm.add_special_tokens(text_tokenizer)
                 
-                # Create a synthetic dataset for text-to-graph generation
+                # Create a text-graph dataset using the fixed class
                 if args.is_master:
-                    print("Creating synthetic text-graph dataset for LLM training...")
+                    print("Creating text-graph dataset for LLM training...")
                 
                 # Create text-graph dataset
-                
-                
-                # Create text-graph dataset and dataloader
                 if args.dataset.lower() in ['cora', 'citeseer', 'pubmed']:
-                    text_graph_dataset = TextGraphDataset(subgraphs, text_tokenizer, num_samples=100)
+                    text_graph_dataset = TextGraphDataset(
+                        graph_data=subgraphs,
+                        text_tokenizer=text_tokenizer,
+                        dataset_name=args.dataset,
+                        num_samples=min(200, len(subgraphs) * 2),  # Reasonable number of samples
+                        max_length=128
+                    )
                 else:
-                    text_graph_dataset = TextGraphDataset(dataset, text_tokenizer, num_samples=100)
+                    text_graph_dataset = TextGraphDataset(
+                        graph_data=dataset[:100],  # Limit for memory
+                        text_tokenizer=text_tokenizer,
+                        dataset_name=args.dataset,
+                        num_samples=100,
+                        max_length=128
+                    )
                 
                 # Create distributed sampler for LLM training
                 if args.local_rank != -1:
@@ -937,12 +1112,15 @@ def hierarchical_graphvq_pipeline_ddp(args):
                 else:
                     llm_sampler = None
                 
+                # Use standard PyTorch DataLoader with custom collate function
                 text_graph_dataloader = torch.utils.data.DataLoader(
                     text_graph_dataset, 
-                    batch_size=args.batch_size,
+                    batch_size=max(1, args.batch_size // 4),  # Reduce batch size for memory efficiency
                     shuffle=(llm_sampler is None),
                     sampler=llm_sampler,
-                    drop_last=True
+                    drop_last=True,
+                    collate_fn=graph_text_collate_fn,  # Use custom collate function
+                    num_workers=0  # Avoid multiprocessing issues with graph data
                 )
                 
                 # Create optimizer for LLM
@@ -984,6 +1162,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
     
     if args.is_master:
         print("Hierarchical GraphVQ DDP pipeline completed")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Hierarchical GraphVQ with DDP')
@@ -1032,10 +1211,9 @@ def main():
     
     args = parser.parse_args()
     
-    # Set environment variables for DDP
-
     # Run the pipeline
     hierarchical_graphvq_pipeline_ddp(args)
+
 
 if __name__ == "__main__":
     main()
