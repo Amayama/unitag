@@ -98,7 +98,12 @@ class GraphLLM(nn.Module):
         # Add end token for graph
         text_tokens.append(self.graph_token_map.get('END_GRAPH', 0))
         
-        return torch.tensor(text_tokens)
+        device = next(self.parameters()).device
+        for z in Z_list:
+            if z is not None and hasattr(z, 'device'):
+                device = z.device
+                break
+        return torch.tensor(text_tokens, device=device)
     
     def tokens_to_graph(self, tokens):
         """
@@ -154,8 +159,10 @@ class GraphLLM(nn.Module):
             logits: Next token prediction logits
         """
         # Get embeddings from extended vocabulary
+        print(input_ids.shape)
         embeddings = self.token_embedding(input_ids)
-        
+        print(embeddings.shape)
+
         # Forward pass through base LLM
         outputs = self.base_llm(inputs_embeds=embeddings, attention_mask=attention_mask)
         
