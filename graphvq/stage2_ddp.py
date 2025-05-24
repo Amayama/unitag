@@ -26,10 +26,10 @@ import sys
 import traceback
 
 # Import model definitions
-from models.graph_decoder import GraphDecoder
-from models.graph_encoder import GNNEncoder
-from models.graph_llm import GraphLLM
-from models.graph_tokenizer import GraphTokenizer
+from model.graph_decoder import GraphDecoder
+from model.graph_encoder import GNNEncoder
+from model.graph_llm import GraphLLM
+from model.graph_tokenizer import GraphTokenizer
 
 
 class TextGraphDataset(Dataset):
@@ -513,7 +513,7 @@ def train_graph_tokenizer_ddp(tokenizer, data_loader, optimizer, args, epochs=10
         
         if args.use_wandb:
             wandb.save(final_path)
-            wandb.finish()
+            #wandb.finish()
     
     # Load best model on all processes
     if best_model_state is not None:
@@ -638,7 +638,7 @@ def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=
                         # Single graph
                         edge_index, x = graph.edge_index, graph.x
                     
-                    Z_list = graph_llm.tokenizer.encode_graph(edge_index, x).to(args.device)
+                    Z_list = graph_llm.tokenizer.encode_graph(edge_index, x)
                     
                     # Convert to text tokens - handle None values properly
                     if Z_list and any(z is not None for z in Z_list):
@@ -844,7 +844,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
     
     # Define model parameters
     input_dim = 1433  # Will be updated based on dataset
-    hidden_dim = 256
+    hidden_dim = 512*7
     K = 3
     M_list = [256, 128, 64]
     p = 20
@@ -1044,8 +1044,8 @@ def hierarchical_graphvq_pipeline_ddp(args):
                         graph_data=subgraphs,
                         text_tokenizer=text_tokenizer,
                         dataset_name=args.dataset,
-                        num_samples=min(200, len(subgraphs) * 2),  # Reasonable number of samples
-                        max_length=128
+                        num_samples=min(100, len(subgraphs) * 2),  # Reasonable number of samples
+                        max_length=256
                     )
                 else:
                     text_graph_dataset = TextGraphDataset(
@@ -1053,7 +1053,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
                         text_tokenizer=text_tokenizer,
                         dataset_name=args.dataset,
                         num_samples=100,
-                        max_length=128
+                        max_length=256
                     )
                 
                 # Create distributed sampler for LLM training
