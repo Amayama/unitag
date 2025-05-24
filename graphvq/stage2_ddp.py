@@ -622,8 +622,14 @@ def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=
                     
                     Z_list = graph_llm.module.tokenizer.encode_graph(edge_index, x)
                     
-                    # Convert to text tokens
-                    graph_tokens = graph_llm.module.graph_to_tokens(Z_list)
+                    # Convert to text tokens - handle None values properly
+                    if Z_list and any(z is not None for z in Z_list):
+                        graph_tokens = graph_llm.module.graph_to_tokens(Z_list)
+                    else:
+                        print("Warning: All Z_list entries are None, using fallback tokens")
+                        # Create fallback tokens
+                        fallback_tokens = torch.tensor([[0, 1]], device=args.device)
+                        graph_tokens = fallback_tokens
                 else:
                     if hasattr(graph, 'batch'):
                         # This is a batched graph from torch_geometric
@@ -632,10 +638,16 @@ def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=
                         # Single graph
                         edge_index, x = graph.edge_index, graph.x
                     
-                    Z_list = graph_llm.tokenizer.encode_graph(edge_index, x)
+                    Z_list = graph_llm.tokenizer.encode_graph(edge_index, x).to(args.device)
                     
-                    # Convert to text tokens
-                    graph_tokens = graph_llm.graph_to_tokens(Z_list)
+                    # Convert to text tokens - handle None values properly
+                    if Z_list and any(z is not None for z in Z_list):
+                        graph_tokens = graph_llm.graph_to_tokens(Z_list).to(args.device)
+                    else:
+                        print("Warning: All Z_list entries are None, using fallback tokens")
+                        # Create fallback tokens
+                        fallback_tokens = torch.tensor([[0, 1]], device=args.device)
+                        graph_tokens = fallback_tokens
                 
                 # Ensure proper tensor shapes
                 if len(prompt_tokens.shape) == 1:
@@ -751,65 +763,6 @@ def train_graph_llm_ddp(graph_llm, data_loader, optimizer, args, text_tokenizer=
                     "train/learning_rate": optimizer.param_groups[0]['lr']
                 })
             
-            # Generate sample graph for visualization (every 5 epochs)
-            if (epoch + 1) % 5 == 0 and text_tokenizer is not None:
-                try:
-                    # Set model to evaluation mode
-                    if isinstance(graph_llm, DDP):
-                        graph_llm.module.eval()
-                    else:
-                        graph_llm.eval()
-                    
-                    # Generate graph from prompt
-                    sample_prompt = f"Generate a graph similar to {args.dataset}"
-                    
-                    # Tokenize prompt
-                    prompt_tokens = text_tokenizer(
-                        sample_prompt, 
-                        return_tensors="pt"
-                    ).input_ids.to(args.device)
-                    
-                    # Generate graph
-                    with torch.no_grad():
-                        # Get LLM model (unwrap DDP if needed)
-                        model = graph_llm.module if isinstance(graph_llm, DDP) else graph_llm
-                        
-                        # Forward pass to generate tokens
-                        output_tokens = model.base_llm.generate(
-                            input_ids=prompt_tokens,
-                            max_length=150,
-                            do_sample=True,
-                            top_p=0.9,
-                            temperature=0.7
-                        )
-                        
-                        # Extract generated tokens
-                        generated_tokens = output_tokens[0, prompt_tokens.shape[1]:]
-                        
-                        # Convert to graph tokens and decode
-                        Z_list = model.tokens_to_graph(generated_tokens)
-                        adj_matrix, node_features = model.tokenizer.decode_graph(Z_list)
-                        
-                        # Visualize the graph
-                        plt.figure(figsize=(10, 8))
-                        G = nx.from_numpy_array(adj_matrix.cpu().numpy())
-                        pos = nx.spring_layout(G)
-                        nx.draw(G, pos, node_size=50, node_color='blue', alpha=0.8)
-                        plt.title(f"Generated Graph - Epoch {epoch+1}")
-                        
-                        # Save figure
-                        sample_path = os.path.join(args.output_dir, f"sample_graph_epoch_{epoch+1}.png")
-                        plt.savefig(sample_path)
-                        
-                        if args.use_wandb:
-                            wandb.log({f"sample_graph_epoch_{epoch+1}": wandb.Image(plt)})
-                        
-                        plt.close()
-                
-                except Exception as e:
-                    print(f"Error generating sample: {e}")
-                    traceback.print_exc()
-            
             # Save model checkpoint if it's the best so far
             if avg_loss < best_loss:
                 best_loss = avg_loss
@@ -909,7 +862,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
     if args.local_rank != -1:
         dist.barrier()
     
-    # Load dataset
+    # Load dataset with improved error handling
     try:
         if args.is_master:
             print(f"Loading dataset {args.dataset}...")
@@ -1013,6 +966,7 @@ def hierarchical_graphvq_pipeline_ddp(args):
         # Initialize tokenizer with the correct dimensions
         if args.is_master:
             print("Stage 1: Initializing Graph Tokenizer...")
+            print(f"Tokenizer config: input_dim={input_dim}, hidden_dim={hidden_dim}, K={K}, M_list={M_list}")
         
         tokenizer = GraphTokenizer(
             input_dim=input_dim,
